@@ -236,7 +236,7 @@ class MacroJobManager {
     };
 
     // 첫 번째 시도는 즉시
-    j.nextAt = Date.now() + job.settings.intervalMs;
+    job.nextAt = Date.now() + job.settings.intervalMs;
     void tick();
   }
 
