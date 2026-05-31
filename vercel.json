@@ -1,0 +1,18 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "regions": ["icn1"],
+  "functions": {
+    "src/app/api/booking/login/route.ts": {
+      "maxDuration": 30
+    },
+    "src/app/api/booking/search/route.ts": {
+      "maxDuration": 30
+    },
+    "src/app/api/booking/reserve/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}
