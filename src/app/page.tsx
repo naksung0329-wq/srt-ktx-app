@@ -109,7 +109,7 @@ export default function Home() {
       const data = await res.json();
       if (!data.success) return;
       const jobStatus: MacroJobStatus = data.data;
-      setServerMacroState({ status: jobStatus.status, ...jobStatus });
+      setServerMacroState({ ...jobStatus });
 
       if (jobStatus.status === 'success') {
         setSuccess(jobStatus.reservation ?? null);
