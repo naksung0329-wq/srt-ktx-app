@@ -82,7 +82,10 @@ export default function Home() {
   // ===== 매크로 설정 =====
   const [macroIntervalSec, setMacroIntervalSec] = useState(15);
   const [macroMaxAttempts, setMacroMaxAttempts] = useState(240);
+  const [macroPartial, setMacroPartial] = useState(true); // 인원 분할 예약 허용
   const [showMacroSettings, setShowMacroSettings] = useState(false);
+  // 재시작용: jobId → 매크로 시작 본문 스냅샷 (메모리 보관, 비밀번호 localStorage 미저장)
+  const jobBodiesRef = useRef<Record<string, Record<string, unknown>>>({});
 
   // ===== 서버 매크로 잡 =====
   // serverJobs: jobId → MacroJobStatus
@@ -128,7 +131,15 @@ export default function Home() {
       const res = await fetch(`/api/macro/${jobId}`);
       if (res.status === 404) {
         removeSavedJobId(jobId);
-        setServerJobs(prev => { const next = { ...prev }; delete next[jobId]; return next; });
+        // 서버가 잡을 잃음(재시작/슬립). 재시작 정보가 있으면 '소실'로 표시해 다시 시작 유도.
+        if (jobBodiesRef.current[jobId]) {
+          setServerJobs(prev => prev[jobId] ? ({
+            ...prev,
+            [jobId]: { ...prev[jobId], status: 'failed', error: 'server-lost', lastMessage: '서버 재시작으로 중단됨 — 다시 시작하세요' },
+          }) : prev);
+        } else {
+          setServerJobs(prev => { const next = { ...prev }; delete next[jobId]; return next; });
+        }
         return;
       }
       const data = await res.json();
@@ -294,48 +305,85 @@ export default function Home() {
     } finally { setReservingId(null); }
   }
 
+  // 매크로 시작 본문으로 잡 생성 (신규 시작 / 재시작 공용)
+  async function launchMacro(
+    body: Record<string, unknown>,
+    meta: { trainId: string; trainNo: string; trainTypeName: string; depTime: string },
+  ) {
+    const res = await fetch('/api/macro/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || '매크로 시작 실패');
+
+    const jobId: string = data.jobId;
+    jobBodiesRef.current[jobId] = body;
+    addSavedJobId(jobId);
+    setJobMeta(prev => ({ ...prev, [jobId]: meta }));
+    setServerJobs(prev => ({
+      ...prev,
+      [jobId]: {
+        id: jobId, status: 'running',
+        attempts: 0, maxAttempts: (body.maxAttempts as number) ?? macroMaxAttempts,
+        lastMessage: '서버 시작 중...', nextCheckIn: macroIntervalSec,
+        securedCount: 0, passengers: (body.passengers as number) ?? 1,
+        partial: !!body.allowPartial && ((body.passengers as number) ?? 1) > 1,
+        transientError: false,
+        createdAt: Date.now(), carrier: body.carrier as Carrier,
+        dep: body.dep as string, arr: body.arr as string, date: body.date as string, time: body.time as string,
+      } as MacroJobStatus,
+    }));
+    setShowJobsPanel(true);
+    startGlobalPolling();
+  }
+
   // 건별 매크로 시작 (열차 하나씩 독립 잡)
   async function startMacroForTrain(train: Train) {
     if (!activeProfile || !unlockedPw) { setError('프로필 활성화 필요'); return; }
     clearMsgs();
-
+    const meta = { trainId: train.id, trainNo: train.trainNo, trainTypeName: train.trainTypeName, depTime: train.depTime };
+    const body: Record<string, unknown> = {
+      carrier: activeProfile.carrier,
+      credential: activeProfile.credential,
+      password: unlockedPw,
+      dep, arr, date, time, passengers: psg,
+      intervalMs: macroIntervalSec * 1000,
+      maxAttempts: macroMaxAttempts,
+      seatPreference: seatPref,
+      allowPartial: macroPartial && psg > 1,
+      targets: [meta],
+      telegram: telegram?.enabled ? { botToken: telegram.botToken, chatId: telegram.chatId } : undefined,
+    };
     try {
-      const res = await fetch('/api/macro/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          carrier: activeProfile.carrier,
-          credential: activeProfile.credential,
-          password: unlockedPw,
-          dep, arr, date, time, passengers: psg,
-          intervalMs: macroIntervalSec * 1000,
-          maxAttempts: macroMaxAttempts,
-          seatPreference: seatPref,
-          targets: [{ trainId: train.id, trainNo: train.trainNo, trainTypeName: train.trainTypeName, depTime: train.depTime }],
-          telegram: telegram?.enabled ? { botToken: telegram.botToken, chatId: telegram.chatId } : undefined,
-        }),
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || '매크로 시작 실패');
-
-      const jobId: string = data.jobId;
-      addSavedJobId(jobId);
-      setJobMeta(prev => ({ ...prev, [jobId]: { trainId: train.id, trainNo: train.trainNo, trainTypeName: train.trainTypeName, depTime: train.depTime } }));
-      setServerJobs(prev => ({
-        ...prev,
-        [jobId]: {
-          id: jobId, status: 'running',
-          attempts: 0, maxAttempts: macroMaxAttempts,
-          lastMessage: '서버 시작 중...', nextCheckIn: macroIntervalSec,
-          createdAt: Date.now(), carrier: activeProfile.carrier,
-          dep, arr, date, time,
-        } as MacroJobStatus,
-      }));
-      setShowJobsPanel(true);
-      startGlobalPolling();
+      await launchMacro(body, meta);
     } catch (e) {
       setError(e instanceof Error ? e.message : '매크로 시작 오류');
     }
+  }
+
+  // 실패/중지/소실된 잡을 동일 조건으로 다시 시작
+  async function restartMacro(jobId: string) {
+    const body = jobBodiesRef.current[jobId];
+    const meta = jobMeta[jobId];
+    if (!body || !meta) { setError('재시작 정보가 없습니다 (열차를 다시 조회 후 매크로를 시작하세요)'); return; }
+    dismissJob(jobId);
+    try {
+      await launchMacro(body, meta);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '재시작 오류');
+    }
+  }
+
+  // 대기 무시 즉시 재시도
+  async function retryMacroNow(jobId: string) {
+    try {
+      await fetch(`/api/macro/${jobId}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'retry' }),
+      });
+      void pollOneJob(jobId);
+    } catch { /* ignore */ }
   }
 
   async function stopServerMacro(jobId: string) {
@@ -488,15 +536,32 @@ export default function Home() {
                           }}>
                             {isRunning ? `${job.attempts}/${job.maxAttempts}회` : isSuccess ? '✅ 성공' : job.status === 'failed' ? '❌ 실패' : '■ 중지'}
                           </span>
-                          {isRunning
-                            ? <button onClick={() => void stopServerMacro(job.id)} className="flex-shrink-0 px-2 py-0.5 rounded font-bold text-[10px]" style={{ background: 'var(--danger)', color: '#fff' }}>중지</button>
-                            : <button onClick={() => dismissJob(job.id)} className="flex-shrink-0 px-2 py-0.5 rounded font-bold text-[10px]" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>닫기</button>
-                          }
+                          {isRunning ? (
+                            <>
+                              <button onClick={() => void retryMacroNow(job.id)} className="flex-shrink-0 px-2 py-0.5 rounded font-bold text-[10px]" style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}>↻ 재시도</button>
+                              <button onClick={() => void stopServerMacro(job.id)} className="flex-shrink-0 px-2 py-0.5 rounded font-bold text-[10px]" style={{ background: 'var(--danger)', color: '#fff' }}>중지</button>
+                            </>
+                          ) : (
+                            <>
+                              {jobBodiesRef.current[job.id] && !isSuccess && (
+                                <button onClick={() => void restartMacro(job.id)} className="flex-shrink-0 px-2 py-0.5 rounded font-bold text-[10px]" style={{ background: 'var(--warning)', color: '#fff' }}>▶ 다시 시작</button>
+                              )}
+                              <button onClick={() => dismissJob(job.id)} className="flex-shrink-0 px-2 py-0.5 rounded font-bold text-[10px]" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>닫기</button>
+                            </>
+                          )}
                         </div>
-                        {isRunning && (
-                          <div className="text-[10px] truncate" style={{ color: 'var(--text-muted)' }}>
-                            {job.dep}→{job.arr} · {job.nextCheckIn}초 후 재시도 · {job.lastMessage}
+                        {job.partial && (job.securedCount ?? 0) > 0 && (
+                          <div className="text-[10px] font-bold mb-0.5" style={{ color: 'var(--success)' }}>
+                            🎫 {job.securedCount}/{job.passengers}명 확보{job.status === 'running' ? ' — 나머지 확보 중' : ''}
                           </div>
+                        )}
+                        {isRunning && (
+                          <div className="text-[10px] truncate" style={{ color: job.transientError ? 'var(--warning)' : 'var(--text-muted)' }}>
+                            {job.dep}→{job.arr} · {job.nextCheckIn}초 후 · {job.lastMessage}
+                          </div>
+                        )}
+                        {!isRunning && !isSuccess && job.error && (
+                          <div className="text-[10px] truncate" style={{ color: 'var(--danger)' }}>{job.lastMessage}</div>
                         )}
                       </div>
                     );
@@ -662,7 +727,7 @@ export default function Home() {
               className="w-full flex items-center justify-between px-3 py-2.5 text-xs"
               style={{ color: 'var(--text-muted)' }}
             >
-              <span className="font-bold">⚙️ 매크로 설정 — 간격 {macroIntervalSec}초 · 최대 {macroMaxAttempts === 9999 ? '무제한' : `${macroMaxAttempts}회`}</span>
+              <span className="font-bold">⚙️ 매크로 설정 — 간격 {macroIntervalSec}초 · 최대 {macroMaxAttempts === 9999 ? '무제한' : `${macroMaxAttempts}회`}{psg > 1 ? ` · ${macroPartial ? '분할' : '동시'}` : ''}</span>
               <span>{showMacroSettings ? '▲' : '▼'}</span>
             </button>
             {showMacroSettings && (
@@ -679,6 +744,26 @@ export default function Home() {
                     options={['60','120','240','720','9999']}
                     renderOption={v => ({ '60':'60회(15분)','120':'120회(30분)','240':'240회(1시간)','720':'720회(3시간)','9999':'무제한' } as Record<string,string>)[v]} />
                 </div>
+                {psg > 1 && (
+                  <div className="col-span-2 pt-2">
+                    <Label>예약 방식 (인원 {psg}명)</Label>
+                    <div className="grid grid-cols-2 gap-1.5 mt-0.5">
+                      <button onClick={() => setMacroPartial(true)} className="py-2 rounded-lg text-[11px] font-bold transition"
+                        style={{ background: macroPartial ? 'var(--primary)' : 'var(--surface-2)', color: macroPartial ? 'var(--primary-text)' : 'var(--text-muted)' }}>
+                        한 명씩 분할
+                      </button>
+                      <button onClick={() => setMacroPartial(false)} className="py-2 rounded-lg text-[11px] font-bold transition"
+                        style={{ background: !macroPartial ? 'var(--primary)' : 'var(--surface-2)', color: !macroPartial ? 'var(--primary-text)' : 'var(--text-muted)' }}>
+                        {psg}명 동시
+                      </button>
+                    </div>
+                    <p className="text-[10px] mt-1" style={{ color: 'var(--text-muted)' }}>
+                      {macroPartial
+                        ? '자리가 1석씩 나도 즉시 확보 (예약번호·결제 각각 분리)'
+                        : `${psg}석이 동시에 나야 한 번에 예약 (좌석 인접)`}
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>
