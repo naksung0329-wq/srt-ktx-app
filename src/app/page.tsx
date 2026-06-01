@@ -10,15 +10,7 @@ import {
 } from '@/lib/storage';
 import type { MacroJobStatus } from '@/lib/macro-job-manager';
 
-// 서버 매크로 상태 (MacroJobStatus 기반)
-type ServerMacroState =
-  | { status: 'idle' }
-  | ({ status: 'running' } & MacroJobStatus)
-  | ({ status: 'success' } & MacroJobStatus)
-  | ({ status: 'failed' } & MacroJobStatus)
-  | ({ status: 'stopped' } & MacroJobStatus);
-
-const SERVER_JOB_KEY = 'railpick_server_job_id';
+const SERVER_JOBS_KEY = 'railpick_server_job_ids';
 
 type SeatPref = 'GENERAL_FIRST' | 'SPECIAL_FIRST' | 'GENERAL_ONLY' | 'SPECIAL_ONLY';
 
@@ -87,47 +79,61 @@ export default function Home() {
   const [info, setInfo] = useState<string | null>(null);
   const [ipBlocked, setIpBlocked] = useState(false);
 
-  // ===== 서버사이드 매크로 =====
+  // ===== 서버사이드 매크로 (다중 잡) =====
   const [selectedTrainIds, setSelectedTrainIds] = useState<Set<string>>(new Set());
   const [macroIntervalSec, setMacroIntervalSec] = useState(15);
   const [macroMaxAttempts, setMacroMaxAttempts] = useState(240);
-  const [serverJobId, setServerJobId] = useState<string | null>(null);
-  const [serverMacroState, setServerMacroState] = useState<ServerMacroState>({ status: 'idle' });
+  const [serverJobs, setServerJobs] = useState<Record<string, MacroJobStatus>>({});
+  const [showJobsPanel, setShowJobsPanel] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // 서버 잡 폴링 함수
-  const pollJobStatus = useCallback(async (jobId: string) => {
+  // 활성 잡 수
+  const activeJobCount = Object.values(serverJobs).filter(j => j.status === 'running').length;
+
+  // 저장된 jobId 목록 관리
+  function getSavedJobIds(): string[] {
+    try { return JSON.parse(localStorage.getItem(SERVER_JOBS_KEY) || '[]'); } catch { return []; }
+  }
+  function addSavedJobId(id: string) {
+    const ids = getSavedJobIds();
+    if (!ids.includes(id)) localStorage.setItem(SERVER_JOBS_KEY, JSON.stringify([...ids, id]));
+  }
+  function removeSavedJobId(id: string) {
+    const ids = getSavedJobIds().filter(x => x !== id);
+    localStorage.setItem(SERVER_JOBS_KEY, JSON.stringify(ids));
+  }
+
+  // 단일 잡 폴링
+  const pollOneJob = useCallback(async (jobId: string) => {
     try {
       const res = await fetch(`/api/macro/${jobId}`);
       if (res.status === 404) {
-        // 서버 재시작 등으로 잡이 사라진 경우
-        stopPolling();
-        setServerMacroState({ status: 'idle' });
-        localStorage.removeItem(SERVER_JOB_KEY);
+        removeSavedJobId(jobId);
+        setServerJobs(prev => { const next = { ...prev }; delete next[jobId]; return next; });
         return;
       }
       const data = await res.json();
       if (!data.success) return;
       const jobStatus: MacroJobStatus = data.data;
-      setServerMacroState({ ...jobStatus });
-
+      setServerJobs(prev => ({ ...prev, [jobId]: jobStatus }));
       if (jobStatus.status === 'success') {
         setSuccess(jobStatus.reservation ?? null);
-        setSelectedTrainIds(new Set());
-        stopPolling();
-        localStorage.removeItem(SERVER_JOB_KEY);
+        removeSavedJobId(jobId);
       } else if (jobStatus.status === 'failed' || jobStatus.status === 'stopped') {
-        stopPolling();
-        localStorage.removeItem(SERVER_JOB_KEY);
+        removeSavedJobId(jobId);
       }
     } catch { /* 네트워크 오류 무시 */ }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function startPolling(jobId: string) {
-    stopPolling();
-    pollRef.current = setInterval(() => void pollJobStatus(jobId), 4_000);
-    void pollJobStatus(jobId); // 즉시 1회
+  // 전체 활성 잡 폴링 루프
+  function startGlobalPolling() {
+    if (pollRef.current) return; // 이미 실행 중
+    pollRef.current = setInterval(() => {
+      const ids = getSavedJobIds();
+      if (ids.length === 0) { stopPolling(); return; }
+      ids.forEach(id => void pollOneJob(id));
+    }, 4_000);
   }
 
   function stopPolling() {
@@ -138,11 +144,11 @@ export default function Home() {
     setProfiles(loadProfiles());
     setTelegramState(loadTelegram());
 
-    // 페이지 로드 시 이전 잡 복구 (브라우저 닫았다 켜도 상태 유지)
-    const savedJobId = localStorage.getItem(SERVER_JOB_KEY);
-    if (savedJobId) {
-      setServerJobId(savedJobId);
-      startPolling(savedJobId);
+    // 페이지 로드 시 이전 잡 복구
+    const savedIds = getSavedJobIds();
+    if (savedIds.length > 0) {
+      savedIds.forEach(id => void pollOneJob(id));
+      startGlobalPolling();
     }
 
     return () => stopPolling();
@@ -151,7 +157,7 @@ export default function Home() {
 
   useEffect(() => {
     if (carrier === 'SRT') {
-      if (!SRT_STATION_LIST.includes(dep)) setDep('수서');
+      if (!SRT_STATION_LIST.includes(dep)) setDep('수섧);
       if (!SRT_STATION_LIST.includes(arr)) setArr('부산');
     } else {
       if (!KTX_STATIONS.includes(dep)) setDep('서울');
@@ -162,13 +168,12 @@ export default function Home() {
 
   const stations = carrier === 'SRT' ? SRT_STATION_LIST : KTX_STATIONS;
   const activeProfile = profiles.find(p => p.id === activeProfileId) || null;
-  const macroRunning = serverMacroState.status === 'running';
   const soldoutTrains = useMemo(() => trains.filter(t => t.general !== 'AVAILABLE' && t.special !== 'AVAILABLE'), [trains]);
 
   function clearMsgs() { setError(null); setInfo(null); setSuccess(null); }
 
   function handleAddProfile() {
-    if (!npLabel || !npCred || !npPw) { setError('별칭/아이디/비밀번호 모두 입력'); return; }
+    if (!npLabel || !npCred || !npPw) { setError('별칌/아이씓/비밀번호 모두 입력'); return; }
     const p = addProfile({ carrier: npCarrier, label: npLabel, credential: npCred, password: npPw });
     setProfiles(loadProfiles());
     setActiveProfileId(p.id);
@@ -176,7 +181,7 @@ export default function Home() {
     setCarrier(p.carrier);
     setShowAddProfile(false);
     setNpLabel(''); setNpCred(''); setNpPw('');
-    setInfo(`✓ ${p.label} 저장됨`);
+    setInfo(`✓ ${p.label} 저장력`);
   }
 
   function handleSelectProfile(p: Profile) {
@@ -195,7 +200,7 @@ export default function Home() {
   }
 
   async function handleSaveTelegram() {
-    if (!tgToken || !tgChatId) { setError('봇 토큰과 Chat ID 모두 입력'); return; }
+    if (!tgToken || !tgChatId) { setError('볇  토큰과 Chat ID 모두 입력'); return; }
     setTgVerifying(true); clearMsgs();
     try {
       const res = await fetch('/api/booking/telegram-verify', {
@@ -282,7 +287,7 @@ export default function Home() {
   }
 
   async function startMacro() {
-    if (!activeProfile || !unlockedPw) { setError('프로필 활성화 필요'); return; }
+    if (!activeProfile || !unlockedPw) { setError('프로필 활성��� 필요'); return; }
     if (selectedTrainIds.size === 0) { setError('매크로 대상 ☐ 체크'); return; }
 
     clearMsgs();
@@ -310,28 +315,35 @@ export default function Home() {
       if (!data.success) throw new Error(data.error || '매크로 시작 실패');
 
       const jobId: string = data.jobId;
-      setServerJobId(jobId);
-      localStorage.setItem(SERVER_JOB_KEY, jobId);
-      setServerMacroState({ status: 'running', id: jobId, attempts: 0, maxAttempts: macroMaxAttempts, lastMessage: '서버 시작 중...', nextCheckIn: macroIntervalSec, createdAt: Date.now(), carrier: activeProfile.carrier, dep, arr, date, time });
-      startPolling(jobId);
+      addSavedJobId(jobId);
+      setServerJobs(prev => ({ ...prev, [jobId]: { id: jobId, status: 'running', attempts: 0, maxAttempts: macroMaxAttempts, lastMessage: '서버 시작 중...', nextCheckIn: macroIntervalSec, createdAt: Date.now(), carrier: activeProfile.carrier, dep, arr, date, time } }));
+      startGlobalPolling();
+      setShowJobsPanel(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : '매크로 시작 오류');
     }
   }
 
-  async function stopServerMacro() {
-    if (!serverJobId) return;
+  async function stopServerMacro(jobId: string) {
     try {
-      await fetch(`/api/macro/${serverJobId}`, {
+      await fetch(`/api/macro/${jobId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'stop' }),
       });
     } catch { /* ignore */ }
-    stopPolling();
-    setServerMacroState({ status: 'idle' });
-    setServerJobId(null);
-    localStorage.removeItem(SERVER_JOB_KEY);
+    removeSavedJobId(jobId);
+    setServerJobs(prev => {
+      const next = { ...prev };
+      if (next[jobId]) next[jobId] = { ...next[jobId], status: 'stopped' };
+      return next;
+    });
+    if (getSavedJobIds().length === 0) stopPolling();
+  }
+
+  function dismissJob(jobId: string) {
+    setServerJobs(prev => { const next = { ...prev }; delete next[jobId]; return next; });
+    removeSavedJobId(jobId);
   }
 
   return (
@@ -416,38 +428,48 @@ export default function Home() {
           </div>
         )}
 
-        {/* 서버사이드 매크로 실행 모달 */}
-        {macroRunning && serverMacroState.status === 'running' && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }}>
-            <div className="rounded-3xl p-6 max-w-sm w-full shadow-lg" style={{ background: 'var(--surface)' }}>
-              <div className="text-center mb-4">
-                <div className="text-5xl mb-2 spin">🔄</div>
-                <h2 className="font-black text-xl" style={{ color: 'var(--text)' }}>서버 매크로 실행 중</h2>
-                <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>브라우저를 꺼도 계속 실행됩니다</p>
+        {/* 서버 매크로 잡 패널 (비차단) */}
+        {Object.keys(serverJobs).length > 0 && (
+          <div className="rounded-2xl overflow-hidden shadow" style={{ background: 'var(--surface)', border: '1.5px solid var(--warning)' }}>
+            <button
+              onClick={() => setShowJobsPanel(v => !v)}
+              className="w-full flex items-center gap-2 px-3 py-2.5 text-sm font-black"
+              style={{ background: 'var(--warning-soft)', color: 'var(--warning)' }}
+            >
+              <span className="text-base">⚡</span>
+              <span className="flex-1 text-left">매크로 실행 중 {activeJobCount > 0 && <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-black" style={{ background: 'var(--warning)', color: '#fff' }}>{activeJobCount}</span>}</span>
+              <span style={{ color: 'var(--text-muted)' }}>{showJobsPanel ? '▲' : '▼'}</span>
+            </button>
+            {showJobsPanel && (
+              <div className="divide-y" style={{ borderColor: 'var(--border)' }}>
+                {Object.values(serverJobs).map(job => (
+                  <div key={job.id} className="px-3 py-2.5 text-xs">
+                    <div className="flex items-center gap-1.5 mb-1">
+                      {job.status === 'running' && <span className="w-1.5 h-1.5 rounded-full pulse-ring flex-shrink-0" style={{ background: 'var(--success)' }} />}
+                      <span className="font-bold truncate flex-1" style={{ color: 'var(--text)' }}>
+                        {job.carrier} {job.dep}→{job.arr} {job.date.slice(4,6)}/{job.date.slice(6,8)} {job.time.slice(0,2)}:00~
+                      </span>
+                      <span className="font-bold px-1.5 py-0.5 rounded text-[10px]" style={{
+                        background: job.status === 'running' ? 'var(--success-soft)' : job.status === 'success' ? 'var(--success-soft)' : 'var(--surface-2)',
+                        color: job.status === 'running' ? 'var(--success)' : job.status === 'success' ? 'var(--success)' : 'var(--text-muted)',
+                      }}>
+                        {job.status === 'running' ? `${job.attempts}/${job.maxAttempts}회` : job.status === 'success' ? '✅ 성공' : job.status === 'failed' ? '❌ 실패' : '■ 중지'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="flex-1 truncate" style={{ color: 'var(--text-muted)' }}>
+                        {job.status === 'running' ? `${job.nextCheckIn}초 후 재시도 · ${job.lastMessage}` : (job.error || job.lastMessage)}
+                      </span>
+                      {job.status === 'running'
+                        ? <button onClick={() => void stopServerMacro(job.id)} className="flex-shrink-0 px-2 py-1 rounded font-bold" style={{ background: 'var(--danger)', color: '#fff' }}>중지</button>
+                        : <button onClick={() => dismissJob(job.id)} className="flex-shrink-0 px-2 py-1 rounded font-bold" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>닫기</button>
+                      }
+                    </div>
+                  </div>
+                ))}
               </div>
-              <div className="rounded-xl p-3 space-y-1.5 text-sm mb-3" style={{ background: 'var(--surface-2)' }}>
-                <Row label="시도 횟수" value={`${'attempts' in serverMacroState ? serverMacroState.attempts : 0} / ${macroMaxAttempts}`} />
-                <Row label="다음 확인" value={`${'nextCheckIn' in serverMacroState ? serverMacroState.nextCheckIn : '..'}초 후`} highlight />
-                <Row label="대상 열차" value={`${selectedTrainIds.size}개`} />
-              </div>
-              {'lastMessage' in serverMacroState && serverMacroState.lastMessage && (
-                <div className="text-[11px] rounded-lg px-2 py-1.5 mb-3 break-all" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>
-                  최근: {serverMacroState.lastMessage}
-                </div>
-              )}
-              <div className="flex items-center gap-1.5 text-[11px] mb-3 justify-center" style={{ color: 'var(--success)' }}>
-                <span className="w-1.5 h-1.5 rounded-full pulse-ring" style={{ background: 'var(--success)' }} />
-                서버에서 실행 중 — 창을 닫아도 예약됩니다
-              </div>
-              <button onClick={() => void stopServerMacro()} className="w-full py-3 rounded-xl font-bold text-base" style={{ background: 'var(--danger)', color: '#fff' }}>매크로 중지</button>
-            </div>
+            )}
           </div>
-        )}
-
-        {serverMacroState.status === 'failed' && (
-          <Alert kind="warning" onClose={() => setServerMacroState({ status: 'idle' })}>
-            ⏱️ 매크로 종료: {'error' in serverMacroState ? serverMacroState.error : ''} (시도 {'attempts' in serverMacroState ? serverMacroState.attempts : 0}회)
-          </Alert>
         )}
 
         {/* === 1. 텔레그램 (한 번만 입력, SRT/KTX 공유) === */}
@@ -594,7 +616,7 @@ export default function Home() {
               SPECIAL_ONLY:  '특실만',
             } as Record<string, string>)[v]} />
 
-          <button onClick={handleSearch} disabled={searching || macroRunning}
+          <button onClick={handleSearch} disabled={searching}
             className="w-full py-3.5 rounded-2xl font-black text-base shadow-md transition mt-3 disabled:opacity-50 hover:scale-[0.98]"
             style={{ background: carrier === 'KTX' ? 'var(--ktx)' : 'var(--srt)', color: '#fff' }}>
             {searching ? '⏳ 조회 중…' : `🔍 ${carrier} 열차 조회`}
@@ -629,7 +651,7 @@ export default function Home() {
             <button onClick={() => void startMacro()} disabled={selectedTrainIds.size === 0 || !activeProfile}
               className="w-full py-2.5 rounded-xl text-sm font-black shadow disabled:opacity-40 transition hover:scale-[0.98]"
               style={{ background: 'var(--warning)', color: '#fff' }}>
-              ⚡ 서버 매크로 시작 ({selectedTrainIds.size}개)
+              ⚡ 서버 매크로 시작 ({selectedTrainIds.size}몜)
             </button>
           </div>
         )}
@@ -673,7 +695,7 @@ export default function Home() {
                     <SeatChip kind={t.general}>{t.general === 'AVAILABLE' ? '일반⭕' : t.general === 'WAITING' ? '일반대기' : '일반❌'}</SeatChip>
                     <SeatChip kind={t.special}>{t.special === 'AVAILABLE' ? '특실⭕' : t.special === 'NONE' ? '특실-' : '특실❌'}</SeatChip>
                     {canReserve ? (
-                      <button onClick={() => handleReserve(t)} disabled={reservingId !== null || macroRunning}
+                      <button onClick={() => handleReserve(t)} disabled={reservingId !== null}
                         className="ml-auto text-xs font-bold px-3 py-1.5 rounded-lg disabled:opacity-30 hover:scale-95 transition"
                         style={{ background: isKtx ? 'var(--ktx)' : 'var(--srt)', color: '#fff' }}>
                         {reservingThis ? '예약중…' : '예약'}
@@ -784,3 +806,4 @@ function Row({ label, value, highlight }: { label: string; value: string; highli
     </div>
   );
 }
+ 
