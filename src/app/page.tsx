@@ -91,7 +91,7 @@ export default function Home() {
   const [trainToJobId, setTrainToJobId] = useState<Record<string, string>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // 헬퍼: trainId 憠 힁 가져오길
+  // 헬퍼: trainId로 잡 가져오기
   function getTrainJob(trainId: string): MacroJobStatus | null {
     const jobId = trainToJobId[trainId];
     return jobId ? (serverJobs[jobId] ?? null) : null;
@@ -99,7 +99,7 @@ export default function Home() {
 
   const activeJobCount = Object.values(serverJobs).filter(j => j.status === 'running').length;
 
-  // localStorage 힁 ID 관리
+  // localStorage 잡 ID 관리
   function getSavedJobIds(): string[] {
     try { return JSON.parse(localStorage.getItem(SERVER_JOBS_KEY) || '[]'); } catch { return []; }
   }
@@ -112,7 +112,7 @@ export default function Home() {
     localStorage.setItem(SERVER_JOBS_KEY, JSON.stringify(ids));
   }
 
-  // 단일 힁 ���私
+  // 단일 잡 폴링
   const pollOneJob = useCallback(async (jobId: string) => {
     try {
       const res = await fetch(`/api/macro/${jobId}`);
@@ -162,7 +162,7 @@ export default function Home() {
 
   useEffect(() => {
     if (carrier === 'SRT') {
-      if (!SRT_STATION_LIST.includes(dep)) setDep('수섧');
+      if (!SRT_STATION_LIST.includes(dep)) setDep('수서');
       if (!SRT_STATION_LIST.includes(arr)) setArr('부산');
     } else {
       if (!KTX_STATIONS.includes(dep)) setDep('서울');
@@ -209,7 +209,7 @@ export default function Home() {
     setTgVerifying(true); clearMsgs();
     try {
       const res = await fetch('/api/booking/telegram-verify', {
-        method: 'POST', headers: { 'Content-Type': 'application/json'},
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ botToken: tgToken, chatId: tgChatId }),
       });
       const data = await res.json();
@@ -438,8 +438,8 @@ export default function Home() {
                 </div>
               )}
               <div className="pt-2 mt-2 text-xs" style={{ borderTop: '1px solid var(--border)', color: 'var(--text-muted)' }}>
-                 📱 <b>{success.carrier === 'SRT' ? 'SRT 앱' : '코레일톡'}</b>에서결제 (10분 내)
-                {telegram?.enabled && <div>📨 텔레그램 알림 발송: `됨</div>}
+                📱 <b>{success.carrier === 'SRT' ? 'SRT 앱' : '코레일톡'}</b>에서 결제 (10분 내)
+                {telegram?.enabled && <div>📨 텔레그램 알림 발송됨</div>}
               </div>
             </div>
           </div>
