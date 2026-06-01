@@ -79,18 +79,27 @@ export default function Home() {
   const [info, setInfo] = useState<string | null>(null);
   const [ipBlocked, setIpBlocked] = useState(false);
 
-  // ===== 서버사이드 매크로 (다중 잡) =====
-  const [selectedTrainIds, setSelectedTrainIds] = useState<Set<string>>(new Set());
+  // ===== 매크로 설정 =====
   const [macroIntervalSec, setMacroIntervalSec] = useState(15);
   const [macroMaxAttempts, setMacroMaxAttempts] = useState(240);
+  const [showMacroSettings, setShowMacroSettings] = useState(false);
+
+  // ===== 서버 매크로 잡 (건별) =====
+  // serverJobs: jobId → MacroJobStatus
   const [serverJobs, setServerJobs] = useState<Record<string, MacroJobStatus>>({});
-  const [showJobsPanel, setShowJobsPanel] = useState(false);
+  // trainToJobId: trainId → jobId (현재 세션에서 시작한 매핑)
+  const [trainToJobId, setTrainToJobId] = useState<Record<string, string>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // 활성 잡 수
+  // 헬퍼: trainId 憠 힁 가져오길
+  function getTrainJob(trainId: string): MacroJobStatus | null {
+    const jobId = trainToJobId[trainId];
+    return jobId ? (serverJobs[jobId] ?? null) : null;
+  }
+
   const activeJobCount = Object.values(serverJobs).filter(j => j.status === 'running').length;
 
-  // 저장된 jobId 목록 관리
+  // localStorage 힁 ID 관리
   function getSavedJobIds(): string[] {
     try { return JSON.parse(localStorage.getItem(SERVER_JOBS_KEY) || '[]'); } catch { return []; }
   }
@@ -103,7 +112,7 @@ export default function Home() {
     localStorage.setItem(SERVER_JOBS_KEY, JSON.stringify(ids));
   }
 
-  // 단일 잡 폴링
+  // 단일 힁 ���私
   const pollOneJob = useCallback(async (jobId: string) => {
     try {
       const res = await fetch(`/api/macro/${jobId}`);
@@ -126,9 +135,8 @@ export default function Home() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 전체 활성 잡 폴링 루프
   function startGlobalPolling() {
-    if (pollRef.current) return; // 이미 실행 중
+    if (pollRef.current) return;
     pollRef.current = setInterval(() => {
       const ids = getSavedJobIds();
       if (ids.length === 0) { stopPolling(); return; }
@@ -143,27 +151,24 @@ export default function Home() {
   useEffect(() => {
     setProfiles(loadProfiles());
     setTelegramState(loadTelegram());
-
-    // 페이지 로드 시 이전 잡 복구
     const savedIds = getSavedJobIds();
     if (savedIds.length > 0) {
       savedIds.forEach(id => void pollOneJob(id));
       startGlobalPolling();
     }
-
     return () => stopPolling();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (carrier === 'SRT') {
-      if (!SRT_STATION_LIST.includes(dep)) setDep('수섧);
+      if (!SRT_STATION_LIST.includes(dep)) setDep('수섧');
       if (!SRT_STATION_LIST.includes(arr)) setArr('부산');
     } else {
       if (!KTX_STATIONS.includes(dep)) setDep('서울');
       if (!KTX_STATIONS.includes(arr)) setArr('부산');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [carrier]);
 
   const stations = carrier === 'SRT' ? SRT_STATION_LIST : KTX_STATIONS;
@@ -173,7 +178,7 @@ export default function Home() {
   function clearMsgs() { setError(null); setInfo(null); setSuccess(null); }
 
   function handleAddProfile() {
-    if (!npLabel || !npCred || !npPw) { setError('별칌/아이씓/비밀번호 모두 입력'); return; }
+    if (!npLabel || !npCred || !npPw) { setError('별칭/아이디/비밀번호 모두 입력'); return; }
     const p = addProfile({ carrier: npCarrier, label: npLabel, credential: npCred, password: npPw });
     setProfiles(loadProfiles());
     setActiveProfileId(p.id);
@@ -181,7 +186,7 @@ export default function Home() {
     setCarrier(p.carrier);
     setShowAddProfile(false);
     setNpLabel(''); setNpCred(''); setNpPw('');
-    setInfo(`✓ ${p.label} 저장력`);
+    setInfo(`✓ ${p.label} 저장됨`);
   }
 
   function handleSelectProfile(p: Profile) {
@@ -200,11 +205,11 @@ export default function Home() {
   }
 
   async function handleSaveTelegram() {
-    if (!tgToken || !tgChatId) { setError('볇  토큰과 Chat ID 모두 입력'); return; }
+    if (!tgToken || !tgChatId) { setError('봇 토큰과 Chat ID 모두 입력'); return; }
     setTgVerifying(true); clearMsgs();
     try {
       const res = await fetch('/api/booking/telegram-verify', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json'},
         body: JSON.stringify({ botToken: tgToken, chatId: tgChatId }),
       });
       const data = await res.json();
@@ -230,7 +235,7 @@ export default function Home() {
 
   async function handleSearch() {
     clearMsgs();
-    setSearching(true); setTrains([]); setSelectedTrainIds(new Set());
+    setSearching(true); setTrains([]);
     try {
       const res = await fetch('/api/booking/search', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -278,22 +283,10 @@ export default function Home() {
     } finally { setReservingId(null); }
   }
 
-  function toggleSelect(trainId: string) {
-    setSelectedTrainIds(prev => {
-      const next = new Set(prev);
-      if (next.has(trainId)) next.delete(trainId); else next.add(trainId);
-      return next;
-    });
-  }
-
-  async function startMacro() {
-    if (!activeProfile || !unlockedPw) { setError('프로필 활성��� 필요'); return; }
-    if (selectedTrainIds.size === 0) { setError('매크로 대상 ☐ 체크'); return; }
-
+  // 건별 매크로 시작 (열차 하나씩 독립 잡)
+  async function startMacroForTrain(train: Train) {
+    if (!activeProfile || !unlockedPw) { setError('프로필 활성화 필요'); return; }
     clearMsgs();
-    const targets = trains
-      .filter(t => selectedTrainIds.has(t.id))
-      .map(t => ({ trainId: t.id, trainNo: t.trainNo, trainTypeName: t.trainTypeName, depTime: t.depTime }));
 
     try {
       const res = await fetch('/api/macro/start', {
@@ -307,7 +300,7 @@ export default function Home() {
           intervalMs: macroIntervalSec * 1000,
           maxAttempts: macroMaxAttempts,
           seatPreference: seatPref,
-          targets,
+          targets: [{ trainId: train.id, trainNo: train.trainNo, trainTypeName: train.trainTypeName, depTime: train.depTime }],
           telegram: telegram?.enabled ? { botToken: telegram.botToken, chatId: telegram.chatId } : undefined,
         }),
       });
@@ -316,9 +309,18 @@ export default function Home() {
 
       const jobId: string = data.jobId;
       addSavedJobId(jobId);
-      setServerJobs(prev => ({ ...prev, [jobId]: { id: jobId, status: 'running', attempts: 0, maxAttempts: macroMaxAttempts, lastMessage: '서버 시작 중...', nextCheckIn: macroIntervalSec, createdAt: Date.now(), carrier: activeProfile.carrier, dep, arr, date, time } }));
+      setTrainToJobId(prev => ({ ...prev, [train.id]: jobId }));
+      setServerJobs(prev => ({
+        ...prev,
+        [jobId]: {
+          id: jobId, status: 'running',
+          attempts: 0, maxAttempts: macroMaxAttempts,
+          lastMessage: '서버 시작 중...', nextCheckIn: macroIntervalSec,
+          createdAt: Date.now(), carrier: activeProfile.carrier,
+          dep, arr, date, time,
+        } as MacroJobStatus,
+      }));
       startGlobalPolling();
-      setShowJobsPanel(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : '매크로 시작 오류');
     }
@@ -338,12 +340,22 @@ export default function Home() {
       if (next[jobId]) next[jobId] = { ...next[jobId], status: 'stopped' };
       return next;
     });
+    setTrainToJobId(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(k => { if (next[k] === jobId) delete next[k]; });
+      return next;
+    });
     if (getSavedJobIds().length === 0) stopPolling();
   }
 
   function dismissJob(jobId: string) {
     setServerJobs(prev => { const next = { ...prev }; delete next[jobId]; return next; });
     removeSavedJobId(jobId);
+    setTrainToJobId(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(k => { if (next[k] === jobId) delete next[k]; });
+      return next;
+    });
   }
 
   return (
@@ -356,7 +368,13 @@ export default function Home() {
             <div className="font-black text-lg leading-none" style={{ color: 'var(--text)' }}>RailPick</div>
             <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>KTX · SRT 자동 예매 매크로</div>
           </div>
-          {activeProfile && (
+          {activeJobCount > 0 && (
+            <div className="flex items-center gap-1 text-xs px-2 py-1 rounded-full" style={{ background: 'var(--warning-soft)', color: 'var(--warning)' }}>
+              <span className="w-1.5 h-1.5 rounded-full pulse-ring" style={{ background: 'var(--warning)' }} />
+              매크로 {activeJobCount}건
+            </div>
+          )}
+          {activeProfile && !activeJobCount && (
             <div className="flex items-center gap-1.5 text-xs px-2 py-1 rounded-full" style={{ background: 'var(--success-soft)', color: 'var(--success)' }}>
               <span className="w-1.5 h-1.5 rounded-full pulse-ring" style={{ background: 'var(--success)' }} />
               {activeProfile.label}
@@ -366,7 +384,6 @@ export default function Home() {
             className="w-9 h-9 rounded-full flex items-center justify-center text-base hover:scale-110 transition" style={{ background: 'var(--surface-2)', color: 'var(--text)' }}
             aria-label="설정">⚙️</button>
         </div>
-        {/* 컬러 테마 토글 (설정 펼침) */}
         {showSettings && (
           <div className="max-w-md mx-auto px-4 pb-3">
             <div className="text-[10px] font-bold mb-1.5" style={{ color: 'var(--text-muted)' }}>테마</div>
@@ -421,66 +438,54 @@ export default function Home() {
                 </div>
               )}
               <div className="pt-2 mt-2 text-xs" style={{ borderTop: '1px solid var(--border)', color: 'var(--text-muted)' }}>
-                📱 <b>{success.carrier === 'SRT' ? 'SRT 앱' : '코레일톡'}</b>에서 결제 (10분 내)
-                {telegram?.enabled && <div>📨 텔레그램 알림 발송</div>}
+                 📱 <b>{success.carrier === 'SRT' ? 'SRT 앱' : '코레일톡'}</b>에서결제 (10분 내)
+                {telegram?.enabled && <div>📨 텔레그램 알림 발송: `됨</div>}
               </div>
             </div>
           </div>
         )}
 
-        {/* 서버 매크로 잡 패널 (비차단) */}
-        {Object.keys(serverJobs).length > 0 && (
+        {/* 실행 중인 매크로 목록 (브라우저 재시작 후 복구된 잡들) */}
+        {Object.values(serverJobs).filter(j => !Object.values(trainToJobId).includes(j.id)).length > 0 && (
           <div className="rounded-2xl overflow-hidden shadow" style={{ background: 'var(--surface)', border: '1.5px solid var(--warning)' }}>
-            <button
-              onClick={() => setShowJobsPanel(v => !v)}
-              className="w-full flex items-center gap-2 px-3 py-2.5 text-sm font-black"
-              style={{ background: 'var(--warning-soft)', color: 'var(--warning)' }}
-            >
-              <span className="text-base">⚡</span>
-              <span className="flex-1 text-left">매크로 실행 중 {activeJobCount > 0 && <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-black" style={{ background: 'var(--warning)', color: '#fff' }}>{activeJobCount}</span>}</span>
-              <span style={{ color: 'var(--text-muted)' }}>{showJobsPanel ? '▲' : '▼'}</span>
-            </button>
-            {showJobsPanel && (
-              <div className="divide-y" style={{ borderColor: 'var(--border)' }}>
-                {Object.values(serverJobs).map(job => (
-                  <div key={job.id} className="px-3 py-2.5 text-xs">
-                    <div className="flex items-center gap-1.5 mb-1">
-                      {job.status === 'running' && <span className="w-1.5 h-1.5 rounded-full pulse-ring flex-shrink-0" style={{ background: 'var(--success)' }} />}
-                      <span className="font-bold truncate flex-1" style={{ color: 'var(--text)' }}>
-                        {job.carrier} {job.dep}→{job.arr} {job.date.slice(4,6)}/{job.date.slice(6,8)} {job.time.slice(0,2)}:00~
-                      </span>
-                      <span className="font-bold px-1.5 py-0.5 rounded text-[10px]" style={{
-                        background: job.status === 'running' ? 'var(--success-soft)' : job.status === 'success' ? 'var(--success-soft)' : 'var(--surface-2)',
-                        color: job.status === 'running' ? 'var(--success)' : job.status === 'success' ? 'var(--success)' : 'var(--text-muted)',
-                      }}>
-                        {job.status === 'running' ? `${job.attempts}/${job.maxAttempts}회` : job.status === 'success' ? '✅ 성공' : job.status === 'failed' ? '❌ 실패' : '■ 중지'}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="flex-1 truncate" style={{ color: 'var(--text-muted)' }}>
-                        {job.status === 'running' ? `${job.nextCheckIn}초 후 재시도 · ${job.lastMessage}` : (job.error || job.lastMessage)}
-                      </span>
-                      {job.status === 'running'
-                        ? <button onClick={() => void stopServerMacro(job.id)} className="flex-shrink-0 px-2 py-1 rounded font-bold" style={{ background: 'var(--danger)', color: '#fff' }}>중지</button>
-                        : <button onClick={() => dismissJob(job.id)} className="flex-shrink-0 px-2 py-1 rounded font-bold" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>닫기</button>
-                      }
-                    </div>
+            <div className="px-3 py-2 text-xs font-bold" style={{ background: 'var(--warning-soft)', color: 'var(--warning)' }}>
+              ⚡ 이전 세션 매크로 (복구됨)
+            </div>
+            <div className="divide-y" style={{ borderColor: 'var(--border)' }}>
+              {Object.values(serverJobs).filter(j => !Object.values(trainToJobId).includes(j.id)).map(job => (
+                <div key={job.id} className="px-3 py-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    {job.status === 'running' && <span className="w-1.5 h-1.5 rounded-full pulse-ring flex-shrink-0" style={{ background: 'var(--success)' }} />}
+                    <span className="flex-1 truncate" style={{ color: 'var(--text)' }}>
+                      {job.carrier} {job.dep}→{job.arr} {job.date.slice(4,6)}/{job.date.slice(6,8)}
+                    </span>
+                    <span className="font-bold text-[10px] px-1.5 py-0.5 rounded" style={{
+                      background: job.status === 'running' ? 'var(--success-soft)' : 'var(--surface-2)',
+                      color: job.status === 'running' ? 'var(--success)' : 'var(--text-muted)',
+                    }}>
+                      {job.status === 'running' ? `${job.attempts}/${job.maxAttempts}회` : job.status === 'success' ? '✅ 성공' : job.status === 'failed' ? '❌ 실패' : '■ 중지'}
+                    </span>
+                    {job.status === 'running'
+                      ? <button onClick={() => void stopServerMacro(job.id)} className="px-2 py-0.5 rounded text-[10px] font-bold" style={{ background: 'var(--danger)', color: '#fff' }}>중지</button>
+                      : <button onClick={() => dismissJob(job.id)} className="px-2 py-0.5 rounded text-[10px] font-bold" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>닫기</button>
+                    }
                   </div>
-                ))}
-              </div>
-            )}
+                  {job.status === 'running' && job.lastMessage && (
+                    <div className="mt-1 truncate" style={{ color: 'var(--text-muted)' }}>{job.nextCheckIn}초 후 · {job.lastMessage}</div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
-        {/* === 1. 텔레그램 (한 번만 입력, SRT/KTX 공유) === */}
+        {/* === 1. 텔레그램 === */}
         <Section title="📨 텔레그램 알림" subtitle="한 번 등록하면 SRT·KTX 모든 예약 시 자동 발송">
           {telegram?.enabled ? (
             <div className="flex items-center justify-between gap-2 p-3 rounded-xl" style={{ background: 'var(--success-soft)' }}>
               <div className="text-sm">
                 <div className="font-bold" style={{ color: 'var(--success)' }}>✓ 연동됨</div>
-                <div className="text-xs mt-0.5 truncate" style={{ color: 'var(--text-muted)' }}>
-                  Chat ID: {telegram.chatId}
-                </div>
+                <div className="text-xs mt-0.5 truncate" style={{ color: 'var(--text-muted)' }}>Chat ID: {telegram.chatId}</div>
               </div>
               <button onClick={handleClearTelegram} className="text-xs px-3 py-1.5 rounded-lg" style={{ background: 'var(--surface)', color: 'var(--danger)' }}>해제</button>
             </div>
@@ -490,7 +495,7 @@ export default function Home() {
               <Input placeholder="Chat ID (숫자)" value={tgChatId} onChange={setTgChatId} />
               <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                 @BotFather → /newbot → 토큰 받기<br/>
-                @userinfobot 메시지 → Chat ID 확인 (먼저 본인 봇과 1번 대화 필요)
+                @userinfobot → Chat ID 확인
               </div>
               <div className="flex gap-2">
                 <button onClick={() => { setShowTelegramForm(false); setTgToken(''); setTgChatId(''); }}
@@ -539,7 +544,6 @@ export default function Home() {
               );
             })}
           </div>
-
           {showAddProfile && (
             <div className="mt-3 space-y-2 pt-3" style={{ borderTop: '1px solid var(--border)' }}>
               <div className="grid grid-cols-2 gap-1.5">
@@ -623,40 +627,37 @@ export default function Home() {
           </button>
         </Section>
 
-        {/* 매크로 컨트롤 */}
+        {/* 매크로 설정 (결과 있을 때만) */}
         {trains.length > 0 && soldoutTrains.length > 0 && (
-          <div className="rounded-2xl p-3 shadow" style={{ background: 'var(--warning-soft)', border: '2px solid var(--warning)' }}>
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-2xl">⚡</span>
-              <div className="flex-1">
-                <h3 className="font-black text-sm" style={{ color: 'var(--warning)' }}>매크로 (취소표 자동 예약)</h3>
-                <p className="text-[10px]" style={{ color: 'var(--text-muted)' }}>매진 열차 ☐ 체크 → 시작 → 자리 나면 즉시 예약</p>
-                {!telegram?.enabled && <p className="text-[10px] mt-0.5" style={{ color: 'var(--warning)' }}>💡 텔레그램 등록 시 알림 자동 발송</p>}
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-2 mb-2">
-              <div>
-                <Label>간격 (±20% 지터)</Label>
-                <Select value={String(macroIntervalSec)} onChange={(v) => setMacroIntervalSec(parseInt(v))}
-                  options={['10','15','20','30','60']}
-                  renderOption={v => ({ '10':'10초 (위험)', '15':'15초 (권장)', '20':'20초 (안전)', '30':'30초 (최안전)', '60':'60초' } as Record<string,string>)[v]} />
-              </div>
-              <div>
-                <Label>최대 시도</Label>
-                <Select value={String(macroMaxAttempts)} onChange={(v) => setMacroMaxAttempts(parseInt(v))}
-                  options={['60','120','240','720','9999']}
-                  renderOption={v => ({ '60':'60회 (15분)','120':'120회 (30분)','240':'240회 (1시간)','720':'720회 (3시간)','9999':'무제한' } as Record<string,string>)[v]} />
-              </div>
-            </div>
-            <button onClick={() => void startMacro()} disabled={selectedTrainIds.size === 0 || !activeProfile}
-              className="w-full py-2.5 rounded-xl text-sm font-black shadow disabled:opacity-40 transition hover:scale-[0.98]"
-              style={{ background: 'var(--warning)', color: '#fff' }}>
-              ⚡ 서버 매크로 시작 ({selectedTrainIds.size}몜)
+          <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+            <button
+              onClick={() => setShowMacroSettings(v => !v)}
+              className="w-full flex items-center justify-between px-3 py-2.5 text-xs"
+              style={{ color: 'var(--text-muted)' }}
+            >
+              <span className="font-bold">⚙️ 매크로 설정 — 간격 {macroIntervalSec}초 · 최대 {macroMaxAttempts === 9999 ? '무제한' : `${macroMaxAttempts}회`}</span>
+              <span>{showMacroSettings ? '▲' : '▼'}</span>
             </button>
+            {showMacroSettings && (
+              <div className="px-3 pb-3 grid grid-cols-2 gap-2" style={{ borderTop: '1px solid var(--border)' }}>
+                <div className="pt-2">
+                  <Label>간격 (±20% 지터)</Label>
+                  <Select value={String(macroIntervalSec)} onChange={(v) => setMacroIntervalSec(parseInt(v))}
+                    options={['10','15','20','30','60']}
+                    renderOption={v => ({ '10':'10초 (위험)', '15':'15초 (권장)', '20':'20초 (안전)', '30':'30초 (최안전)', '60':'60초' } as Record<string,string>)[v]} />
+                </div>
+                <div className="pt-2">
+                  <Label>최대 시도</Label>
+                  <Select value={String(macroMaxAttempts)} onChange={(v) => setMacroMaxAttempts(parseInt(v))}
+                    options={['60','120','240','720','9999']}
+                    renderOption={v => ({ '60':'60회(15분)','120':'120회(30분)','240':'240회(1시간)','720':'720회(3시간)','9999':'무제한' } as Record<string,string>)[v]} />
+                </div>
+              </div>
+            )}
           </div>
         )}
 
-        {/* 결과 */}
+        {/* 결과 목록 */}
         {trains.length > 0 && (
           <section className="space-y-2">
             <div className="flex items-center justify-between px-2">
@@ -666,23 +667,26 @@ export default function Home() {
             {trains.map(t => {
               const canReserve = t.general === 'AVAILABLE' || t.special === 'AVAILABLE';
               const reservingThis = reservingId === t.id;
-              const checked = selectedTrainIds.has(t.id);
               const isKtx = t.carrier === 'KTX';
+              const trainJob = getTrainJob(t.id);
+              const jobRunning = trainJob?.status === 'running';
+              const jobDone = trainJob?.status === 'success';
+              const jobStopped = trainJob && (trainJob.status === 'failed' || trainJob.status === 'stopped');
+
               return (
                 <div key={t.id} className="rounded-2xl p-3 transition"
-                  style={{ background: 'var(--surface)', boxShadow: 'var(--shadow)', outline: checked ? `2px solid var(--warning)` : 'none' }}>
+                  style={{
+                    background: 'var(--surface)',
+                    boxShadow: 'var(--shadow)',
+                    outline: jobRunning ? '2px solid var(--success)' : jobDone ? '2px solid var(--success)' : 'none',
+                  }}>
+                  {/* 열차 정보 행 */}
                   <div className="flex items-start gap-2 mb-2">
-                    {!canReserve && (
-                      <button onClick={() => toggleSelect(t.id)}
-                        className="mt-1 w-5 h-5 rounded border-2 flex items-center justify-center text-xs font-black flex-shrink-0 transition"
-                        style={{ background: checked ? 'var(--warning)' : 'transparent', borderColor: checked ? 'var(--warning)' : 'var(--border)', color: checked ? '#fff' : 'transparent' }}>
-                        ✓
-                      </button>
-                    )}
                     <div className="flex-1">
                       <div className="flex items-center gap-1.5">
                         <span className="text-[10px] font-black px-1.5 py-0.5 rounded" style={{ background: isKtx ? 'var(--ktx)' : 'var(--srt)', color: '#fff' }}>{t.trainTypeName}</span>
                         <span className="font-bold text-sm" style={{ color: 'var(--text)' }}>{t.trainNo}호</span>
+                        {jobRunning && <span className="w-1.5 h-1.5 rounded-full pulse-ring flex-shrink-0" style={{ background: 'var(--success)' }} />}
                       </div>
                       <div className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>{t.depName} → {t.arrName}</div>
                     </div>
@@ -691,21 +695,55 @@ export default function Home() {
                       <div className="font-mono text-xs mt-0.5" style={{ color: 'var(--text-soft)' }}>→ {fmtHM(t.arrTime)}</div>
                     </div>
                   </div>
+
+                  {/* 좌석 + 액션 행 */}
                   <div className="flex items-center gap-1.5 text-[11px]">
                     <SeatChip kind={t.general}>{t.general === 'AVAILABLE' ? '일반⭕' : t.general === 'WAITING' ? '일반대기' : '일반❌'}</SeatChip>
                     <SeatChip kind={t.special}>{t.special === 'AVAILABLE' ? '특실⭕' : t.special === 'NONE' ? '특실-' : '특실❌'}</SeatChip>
+
                     {canReserve ? (
                       <button onClick={() => handleReserve(t)} disabled={reservingId !== null}
                         className="ml-auto text-xs font-bold px-3 py-1.5 rounded-lg disabled:opacity-30 hover:scale-95 transition"
                         style={{ background: isKtx ? 'var(--ktx)' : 'var(--srt)', color: '#fff' }}>
                         {reservingThis ? '예약중…' : '예약'}
                       </button>
+                    ) : jobRunning ? (
+                      /* 매크로 실행 중 */
+                      <div className="ml-auto flex items-center gap-1.5">
+                        <span style={{ color: 'var(--success)' }}>🔄 {trainJob.attempts}/{trainJob.maxAttempts}</span>
+                        <button onClick={() => void stopServerMacro(trainJob.id)}
+                          className="px-2 py-1 rounded font-bold text-[10px]" style={{ background: 'var(--danger)', color: '#fff' }}>
+                          중지
+                        </button>
+                      </div>
+                    ) : jobDone ? (
+                      /* 성공 */
+                      <span className="ml-auto font-bold" style={{ color: 'var(--success)' }}>✅ 예약됨</span>
+                    ) : jobStopped ? (
+                      /* 중지/실패 → 재시작 버튼 */
+                      <div className="ml-auto flex items-center gap-1.5">
+                        <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{trainJob.status === 'failed' ? '❌ 실패' : '■ 중지'}</span>
+                        <button onClick={() => void startMacroForTrain(t)} disabled={!activeProfile}
+                          className="px-2 py-1 rounded font-bold text-[10px] disabled:opacity-40" style={{ background: 'var(--warning)', color: '#fff' }}>
+                          재시작
+                        </button>
+                      </div>
                     ) : (
-                      <span className="ml-auto text-[10px] font-bold" style={{ color: checked ? 'var(--warning)' : 'var(--text-soft)' }}>
-                        {checked ? '매크로 대상' : '체크 → 매크로'}
-                      </span>
+                      /* 매크로 시작 버튼 */
+                      <button onClick={() => void startMacroForTrain(t)} disabled={!activeProfile || !unlockedPw}
+                        className="ml-auto text-xs font-bold px-2.5 py-1.5 rounded-lg disabled:opacity-40 hover:scale-95 transition"
+                        style={{ background: 'var(--warning)', color: '#fff' }}>
+                        ⚡ 매크로
+                      </button>
                     )}
                   </div>
+
+                  {/* 매크로 실행 중 상태 메시지 */}
+                  {jobRunning && trainJob.lastMessage && (
+                    <div className="mt-2 text-[10px] px-2 py-1 rounded-lg truncate" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>
+                      {trainJob.nextCheckIn}초 후 재시도 · {trainJob.lastMessage}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -716,7 +754,7 @@ export default function Home() {
           <div className="text-center py-10" style={{ color: 'var(--text-soft)' }}>
             <div className="text-5xl mb-2">🚄</div>
             <div className="text-xs">출발/도착역 · 날짜 · 시간 선택 후 조회</div>
-            <div className="text-[10px] mt-2">매진 열차도 매크로로 자동 예약 가능</div>
+            <div className="text-[10px] mt-2">매진 열차도 ⚡ 매크로로 자동 예약 가능</div>
           </div>
         )}
 
@@ -770,40 +808,4 @@ function Input({ placeholder, value, onChange, type = 'text' }: { placeholder: s
 
 function Select({ value, onChange, options, renderOption, large }: { value: string; onChange: (v: string) => void; options: string[]; renderOption?: (v: string) => string; large?: boolean }) {
   return (
-    <select value={value} onChange={e => onChange(e.target.value)}
-      className={`w-full mt-0.5 px-3 ${large ? 'py-2.5 text-base font-bold' : 'py-2 text-sm'} rounded-xl focus:outline-none`}
-      style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)' }}>
-      {options.map(o => <option key={o} value={o}>{renderOption ? renderOption(o) : o}</option>)}
-    </select>
-  );
-}
-
-function PsgBtn({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
-  return (
-    <button onClick={onClick} disabled={disabled}
-      className="w-9 h-9 rounded-full font-black disabled:opacity-30 transition hover:scale-110 active:scale-95"
-      style={{ background: 'var(--surface)', border: '2px solid var(--border)', color: 'var(--text)' }}>
-      {children}
-    </button>
-  );
-}
-
-function SeatChip({ kind, children }: { kind: 'AVAILABLE'|'SOLDOUT'|'WAITING'|'NONE'; children: React.ReactNode }) {
-  const map = {
-    AVAILABLE: { bg: 'var(--success-soft)', fg: 'var(--success)' },
-    SOLDOUT:   { bg: 'var(--surface-2)',   fg: 'var(--text-soft)' },
-    WAITING:   { bg: 'var(--warning-soft)', fg: 'var(--warning)' },
-    NONE:      { bg: 'var(--surface-2)',   fg: 'var(--text-soft)' },
-  };
-  return <span className="px-2 py-1 rounded-md font-medium" style={{ background: map[kind].bg, color: map[kind].fg }}>{children}</span>;
-}
-
-function Row({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
-  return (
-    <div className="flex justify-between">
-      <span style={{ color: 'var(--text-muted)' }}>{label}</span>
-      <span className="font-bold" style={{ color: highlight ? 'var(--accent)' : 'var(--text)' }}>{value}</span>
-    </div>
-  );
-}
- 
+    <select value={value} onChange={e => onChan
