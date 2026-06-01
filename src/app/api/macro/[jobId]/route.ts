@@ -30,5 +30,13 @@ export async function POST(req: NextRequest, { params }: Params) {
     return NextResponse.json({ success: true });
   }
 
+  if (body.action === 'retry') {
+    const ok = getMacroJobManager().retryNow(jobId);
+    if (!ok) {
+      return NextResponse.json({ success: false, error: '재시도 불가 (잡 없음 또는 비실행)' }, { status: 404 });
+    }
+    return NextResponse.json({ success: true });
+  }
+
   return NextResponse.json({ success: false, error: '알 수 없는 action' }, { status: 400 });
 }
