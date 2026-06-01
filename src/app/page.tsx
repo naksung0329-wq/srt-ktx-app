@@ -84,20 +84,30 @@ export default function Home() {
   const [macroMaxAttempts, setMacroMaxAttempts] = useState(240);
   const [showMacroSettings, setShowMacroSettings] = useState(false);
 
-  // ===== 서버 매크로 잡 (건별) =====
+  // ===== 서버 매크로 잡 =====
   // serverJobs: jobId → MacroJobStatus
   const [serverJobs, setServerJobs] = useState<Record<string, MacroJobStatus>>({});
-  // trainToJobId: trainId → jobId (현재 세션에서 시작한 매핑)
-  const [trainToJobId, setTrainToJobId] = useState<Record<string, string>>({});
+  // jobMeta: jobId → 열차 정보 (로컬 메타데이터, 같은 열차에 여러 잡 허용)
+  const [jobMeta, setJobMeta] = useState<Record<string, { trainId: string; trainNo: string; trainTypeName: string; depTime: string }>>({});
+  const [showJobsPanel, setShowJobsPanel] = useState(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // 헬퍼: trainId로 잡 가져오기
-  function getTrainJob(trainId: string): MacroJobStatus | null {
-    const jobId = trainToJobId[trainId];
-    return jobId ? (serverJobs[jobId] ?? null) : null;
+  const activeJobCount = Object.values(serverJobs).filter(j => j.status === 'running').length;
+
+  // 특정 열차에 실행 중인 잡 수
+  function runningJobCountForTrain(trainId: string): number {
+    return Object.entries(serverJobs).filter(([jobId, job]) =>
+      job.status === 'running' && jobMeta[jobId]?.trainId === trainId
+    ).length;
   }
 
-  const activeJobCount = Object.values(serverJobs).filter(j => j.status === 'running').length;
+  // 좌석 선호도에 따라 지금 바로 예약 가능한지 판단
+  function canReserveNow(t: Train): boolean {
+    if (seatPref === 'SPECIAL_ONLY') return t.special === 'AVAILABLE';
+    if (seatPref === 'GENERAL_ONLY') return t.general === 'AVAILABLE';
+    return t.general === 'AVAILABLE' || t.special === 'AVAILABLE';
+  }
+
 
   // localStorage 잡 ID 관리
   function getSavedJobIds(): string[] {
@@ -173,7 +183,8 @@ export default function Home() {
 
   const stations = carrier === 'SRT' ? SRT_STATION_LIST : KTX_STATIONS;
   const activeProfile = profiles.find(p => p.id === activeProfileId) || null;
-  const soldoutTrains = useMemo(() => trains.filter(t => t.general !== 'AVAILABLE' && t.special !== 'AVAILABLE'), [trains]);
+  // 좌석 선호도 기준으로 매크로 필요한 열차 (즉시 예약 불가)
+  const soldoutTrains = useMemo(() => trains.filter(t => !canReserveNow(t)), [trains, seatPref]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function clearMsgs() { setError(null); setInfo(null); setSuccess(null); }
 
@@ -309,7 +320,7 @@ export default function Home() {
 
       const jobId: string = data.jobId;
       addSavedJobId(jobId);
-      setTrainToJobId(prev => ({ ...prev, [train.id]: jobId }));
+      setJobMeta(prev => ({ ...prev, [jobId]: { trainId: train.id, trainNo: train.trainNo, trainTypeName: train.trainTypeName, depTime: train.depTime } }));
       setServerJobs(prev => ({
         ...prev,
         [jobId]: {
@@ -320,6 +331,7 @@ export default function Home() {
           dep, arr, date, time,
         } as MacroJobStatus,
       }));
+      setShowJobsPanel(true);
       startGlobalPolling();
     } catch (e) {
       setError(e instanceof Error ? e.message : '매크로 시작 오류');
@@ -340,22 +352,14 @@ export default function Home() {
       if (next[jobId]) next[jobId] = { ...next[jobId], status: 'stopped' };
       return next;
     });
-    setTrainToJobId(prev => {
-      const next = { ...prev };
-      Object.keys(next).forEach(k => { if (next[k] === jobId) delete next[k]; });
-      return next;
-    });
+    setJobMeta(prev => { const next = { ...prev }; delete next[jobId]; return next; });
     if (getSavedJobIds().length === 0) stopPolling();
   }
 
   function dismissJob(jobId: string) {
     setServerJobs(prev => { const next = { ...prev }; delete next[jobId]; return next; });
+    setJobMeta(prev => { const next = { ...prev }; delete next[jobId]; return next; });
     removeSavedJobId(jobId);
-    setTrainToJobId(prev => {
-      const next = { ...prev };
-      Object.keys(next).forEach(k => { if (next[k] === jobId) delete next[k]; });
-      return next;
-    });
   }
 
   return (
@@ -445,37 +449,60 @@ export default function Home() {
           </div>
         )}
 
-        {/* 실행 중인 매크로 목록 (브라우저 재시작 후 복구된 잡들) */}
-        {Object.values(serverJobs).filter(j => !Object.values(trainToJobId).includes(j.id)).length > 0 && (
+        {/* ===== 매크로 잡 패널 ===== */}
+        {Object.keys(serverJobs).length > 0 && (
           <div className="rounded-2xl overflow-hidden shadow" style={{ background: 'var(--surface)', border: '1.5px solid var(--warning)' }}>
-            <div className="px-3 py-2 text-xs font-bold" style={{ background: 'var(--warning-soft)', color: 'var(--warning)' }}>
-              ⚡ 이전 세션 매크로 (복구됨)
-            </div>
-            <div className="divide-y" style={{ borderColor: 'var(--border)' }}>
-              {Object.values(serverJobs).filter(j => !Object.values(trainToJobId).includes(j.id)).map(job => (
-                <div key={job.id} className="px-3 py-2 text-xs">
-                  <div className="flex items-center gap-2">
-                    {job.status === 'running' && <span className="w-1.5 h-1.5 rounded-full pulse-ring flex-shrink-0" style={{ background: 'var(--success)' }} />}
-                    <span className="flex-1 truncate" style={{ color: 'var(--text)' }}>
-                      {job.carrier} {job.dep}→{job.arr} {job.date.slice(4,6)}/{job.date.slice(6,8)}
-                    </span>
-                    <span className="font-bold text-[10px] px-1.5 py-0.5 rounded" style={{
-                      background: job.status === 'running' ? 'var(--success-soft)' : 'var(--surface-2)',
-                      color: job.status === 'running' ? 'var(--success)' : 'var(--text-muted)',
-                    }}>
-                      {job.status === 'running' ? `${job.attempts}/${job.maxAttempts}회` : job.status === 'success' ? '✅ 성공' : job.status === 'failed' ? '❌ 실패' : '■ 중지'}
-                    </span>
-                    {job.status === 'running'
-                      ? <button onClick={() => void stopServerMacro(job.id)} className="px-2 py-0.5 rounded text-[10px] font-bold" style={{ background: 'var(--danger)', color: '#fff' }}>중지</button>
-                      : <button onClick={() => dismissJob(job.id)} className="px-2 py-0.5 rounded text-[10px] font-bold" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>닫기</button>
-                    }
-                  </div>
-                  {job.status === 'running' && job.lastMessage && (
-                    <div className="mt-1 truncate" style={{ color: 'var(--text-muted)' }}>{job.nextCheckIn}초 후 · {job.lastMessage}</div>
-                  )}
-                </div>
-              ))}
-            </div>
+            <button
+              onClick={() => setShowJobsPanel(v => !v)}
+              className="w-full flex items-center gap-2 px-3 py-2.5 text-sm font-black"
+              style={{ background: 'var(--warning-soft)', color: 'var(--warning)' }}>
+              <span>⚡</span>
+              <span className="flex-1 text-left">
+                매크로 실행 목록
+                {activeJobCount > 0 && (
+                  <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] font-black" style={{ background: 'var(--warning)', color: '#fff' }}>
+                    {activeJobCount}건 실행중
+                  </span>
+                )}
+              </span>
+              <span style={{ color: 'var(--text-muted)', fontSize: '10px' }}>{showJobsPanel ? '▲ 접기' : '▼ 펼치기'}</span>
+            </button>
+            {showJobsPanel && (
+              <div className="divide-y" style={{ borderColor: 'var(--border)' }}>
+                {Object.values(serverJobs)
+                  .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+                  .map(job => {
+                    const meta = jobMeta[job.id];
+                    const isRunning = job.status === 'running';
+                    const isSuccess = job.status === 'success';
+                    return (
+                      <div key={job.id} className="px-3 py-2.5 text-xs">
+                        <div className="flex items-center gap-1.5 mb-1">
+                          {isRunning && <span className="w-1.5 h-1.5 rounded-full pulse-ring flex-shrink-0" style={{ background: 'var(--success)' }} />}
+                          <span className="font-bold flex-1 truncate" style={{ color: 'var(--text)' }}>
+                            {meta ? `${job.carrier} ${meta.trainTypeName} ${meta.trainNo}호 · ${fmtHM(meta.depTime)}` : `${job.carrier} ${job.dep}→${job.arr}`}
+                          </span>
+                          <span className="font-bold px-1.5 py-0.5 rounded text-[10px]" style={{
+                            background: isRunning ? 'var(--success-soft)' : isSuccess ? 'var(--success-soft)' : 'var(--surface-2)',
+                            color: isRunning ? 'var(--success)' : isSuccess ? 'var(--success)' : 'var(--text-muted)',
+                          }}>
+                            {isRunning ? `${job.attempts}/${job.maxAttempts}회` : isSuccess ? '✅ 성공' : job.status === 'failed' ? '❌ 실패' : '■ 중지'}
+                          </span>
+                          {isRunning
+                            ? <button onClick={() => void stopServerMacro(job.id)} className="flex-shrink-0 px-2 py-0.5 rounded font-bold text-[10px]" style={{ background: 'var(--danger)', color: '#fff' }}>중지</button>
+                            : <button onClick={() => dismissJob(job.id)} className="flex-shrink-0 px-2 py-0.5 rounded font-bold text-[10px]" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>닫기</button>
+                          }
+                        </div>
+                        {isRunning && (
+                          <div className="text-[10px] truncate" style={{ color: 'var(--text-muted)' }}>
+                            {job.dep}→{job.arr} · {job.nextCheckIn}초 후 재시도 · {job.lastMessage}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
           </div>
         )}
 
@@ -627,7 +654,7 @@ export default function Home() {
           </button>
         </Section>
 
-        {/* 매크로 설정 (결과 있을 때만) */}
+        {/* 매크로 설정 */}
         {trains.length > 0 && soldoutTrains.length > 0 && (
           <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
             <button
@@ -665,20 +692,18 @@ export default function Home() {
               <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{trains.length}건 · 매진 {soldoutTrains.length}</span>
             </div>
             {trains.map(t => {
-              const canReserve = t.general === 'AVAILABLE' || t.special === 'AVAILABLE';
+              // 좌석 선호도 기반 즉시 예약 가능 여부
+              const canReserve = canReserveNow(t);
               const reservingThis = reservingId === t.id;
               const isKtx = t.carrier === 'KTX';
-              const trainJob = getTrainJob(t.id);
-              const jobRunning = trainJob?.status === 'running';
-              const jobDone = trainJob?.status === 'success';
-              const jobStopped = trainJob && (trainJob.status === 'failed' || trainJob.status === 'stopped');
+              const runningCount = runningJobCountForTrain(t.id);
 
               return (
                 <div key={t.id} className="rounded-2xl p-3 transition"
                   style={{
                     background: 'var(--surface)',
                     boxShadow: 'var(--shadow)',
-                    outline: jobRunning ? '2px solid var(--success)' : jobDone ? '2px solid var(--success)' : 'none',
+                    outline: runningCount > 0 ? '2px solid var(--success)' : 'none',
                   }}>
                   {/* 열차 정보 행 */}
                   <div className="flex items-start gap-2 mb-2">
@@ -686,7 +711,12 @@ export default function Home() {
                       <div className="flex items-center gap-1.5">
                         <span className="text-[10px] font-black px-1.5 py-0.5 rounded" style={{ background: isKtx ? 'var(--ktx)' : 'var(--srt)', color: '#fff' }}>{t.trainTypeName}</span>
                         <span className="font-bold text-sm" style={{ color: 'var(--text)' }}>{t.trainNo}호</span>
-                        {jobRunning && <span className="w-1.5 h-1.5 rounded-full pulse-ring flex-shrink-0" style={{ background: 'var(--success)' }} />}
+                        {runningCount > 0 && <span className="w-1.5 h-1.5 rounded-full pulse-ring flex-shrink-0" style={{ background: 'var(--success)' }} />}
+                        {runningCount > 0 && (
+                          <span className="text-[10px] font-bold px-1 py-0.5 rounded" style={{ background: 'var(--success-soft)', color: 'var(--success)' }}>
+                            {runningCount}건 실행중
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>{t.depName} → {t.arrName}</div>
                     </div>
@@ -702,48 +732,21 @@ export default function Home() {
                     <SeatChip kind={t.special}>{t.special === 'AVAILABLE' ? '특실⭕' : t.special === 'NONE' ? '특실-' : '특실❌'}</SeatChip>
 
                     {canReserve ? (
+                      /* 즉시 예약 가능 */
                       <button onClick={() => handleReserve(t)} disabled={reservingId !== null}
                         className="ml-auto text-xs font-bold px-3 py-1.5 rounded-lg disabled:opacity-30 hover:scale-95 transition"
                         style={{ background: isKtx ? 'var(--ktx)' : 'var(--srt)', color: '#fff' }}>
                         {reservingThis ? '예약중…' : '예약'}
                       </button>
-                    ) : jobRunning ? (
-                      /* 매크로 실행 중 */
-                      <div className="ml-auto flex items-center gap-1.5">
-                        <span style={{ color: 'var(--success)' }}>🔄 {trainJob.attempts}/{trainJob.maxAttempts}</span>
-                        <button onClick={() => void stopServerMacro(trainJob.id)}
-                          className="px-2 py-1 rounded font-bold text-[10px]" style={{ background: 'var(--danger)', color: '#fff' }}>
-                          중지
-                        </button>
-                      </div>
-                    ) : jobDone ? (
-                      /* 성공 */
-                      <span className="ml-auto font-bold" style={{ color: 'var(--success)' }}>✅ 예약됨</span>
-                    ) : jobStopped ? (
-                      /* 중지/실패 → 재시작 버튼 */
-                      <div className="ml-auto flex items-center gap-1.5">
-                        <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{trainJob.status === 'failed' ? '❌ 실패' : '■ 중지'}</span>
-                        <button onClick={() => void startMacroForTrain(t)} disabled={!activeProfile}
-                          className="px-2 py-1 rounded font-bold text-[10px] disabled:opacity-40" style={{ background: 'var(--warning)', color: '#fff' }}>
-                          재시작
-                        </button>
-                      </div>
                     ) : (
-                      /* 매크로 시작 버튼 */
+                      /* 매크로 버튼 — 클릭마다 새 잡 추가 (여러 번 클릭 가능) */
                       <button onClick={() => void startMacroForTrain(t)} disabled={!activeProfile || !unlockedPw}
-                        className="ml-auto text-xs font-bold px-2.5 py-1.5 rounded-lg disabled:opacity-40 hover:scale-95 transition"
+                        className="ml-auto text-xs font-bold px-2.5 py-1.5 rounded-lg disabled:opacity-40 hover:scale-95 active:scale-90 transition"
                         style={{ background: 'var(--warning)', color: '#fff' }}>
-                        ⚡ 매크로
+                        ⚡ 매크로{runningCount > 0 ? ` +1` : ''}
                       </button>
                     )}
                   </div>
-
-                  {/* 매크로 실행 중 상태 메시지 */}
-                  {jobRunning && trainJob.lastMessage && (
-                    <div className="mt-2 text-[10px] px-2 py-1 rounded-lg truncate" style={{ background: 'var(--surface-2)', color: 'var(--text-muted)' }}>
-                      {trainJob.nextCheckIn}초 후 재시도 · {trainJob.lastMessage}
-                    </div>
-                  )}
                 </div>
               );
             })}
