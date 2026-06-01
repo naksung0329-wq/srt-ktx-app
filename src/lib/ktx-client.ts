@@ -5,6 +5,7 @@
  * 비밀번호는 AES-128-CBC로 암호화 후 base64를 두 번 적용해서 전송한다.
  */
 import crypto from 'node:crypto';
+import { fetch as undiciFetch, ProxyAgent, type RequestInit as UndiciRequestInit } from 'undici';
 import { Train, Reservation } from './types';
 import {
   DYNAPATH_USER_AGENT,
@@ -14,6 +15,21 @@ import {
   generateNonce,
   getDynapathToken,
 } from './dynapath';
+
+/**
+ * KORAIL(smart.letskorail.com)이 클라우드 서버(예: Render) IP를 차단해
+ * 연결 자체가 막히는 경우가 있다(증상: fetch failed). KTX_PROXY_URL(또는
+ * HTTPS_PROXY/HTTP_PROXY)이 설정돼 있으면 KTX 요청만 해당 프록시로 우회한다.
+ * 미설정 시 기존과 동일하게 직접 연결.
+ */
+let _ktxDispatcher: ProxyAgent | null | undefined;
+function getKtxProxyDispatcher(): ProxyAgent | undefined {
+  if (_ktxDispatcher !== undefined) return _ktxDispatcher ?? undefined;
+  const uri = process.env.KTX_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  _ktxDispatcher = uri ? new ProxyAgent({ uri, connectTimeout: 8_000 }) : null;
+  if (uri && process.env.KTX_DEBUG === '1') console.log('[KTX] proxy enabled via', uri.replace(/\/\/[^@]*@/, '//***@'));
+  return _ktxDispatcher ?? undefined;
+}
 
 const KORAIL_DOMAIN = 'https://smart.letskorail.com:443';
 const KORAIL_MOBILE = `${KORAIL_DOMAIN}/classes/com.korail.mobile`;
@@ -91,16 +107,31 @@ export class KtxClient {
       console.log(`  body: ${qs.slice(0, 300)}`);
     }
 
-    let res: Response;
-    if (method === 'GET') {
-      res = await fetch(`${url}?${qs}`, { method: 'GET', headers });
-    } else {
-      res = await fetch(url, { method: 'POST', headers, body: qs });
+    const dispatcher = getKtxProxyDispatcher();
+    const init: UndiciRequestInit =
+      method === 'GET' ? { method: 'GET', headers } : { method: 'POST', headers, body: qs };
+    if (dispatcher) init.dispatcher = dispatcher;
+    const target = method === 'GET' ? `${url}?${qs}` : url;
+
+    let res: Awaited<ReturnType<typeof undiciFetch>>;
+    try {
+      res = await undiciFetch(target, init);
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      // 연결 자체 실패(주로 KORAIL의 클라우드 IP 차단)
+      if (m.includes('fetch failed') || m.toLowerCase().includes('connect')) {
+        throw new Error(
+          dispatcher
+            ? `코레일 서버 연결 실패 (프록시 경유). 프록시 상태/주소를 확인하세요. (${m})`
+            : '코레일이 서버 IP를 차단해 KTX 연결이 불가합니다. 관리자: KTX_PROXY_URL 환경변수에 우회 프록시를 설정하세요.'
+        );
+      }
+      throw e;
     }
-    // Node 18.14+의 getSetCookie() 사용해 multiple set-cookie 정확히 파싱
+    // undici Headers.getSetCookie()로 multiple set-cookie 정확히 파싱
     const setCookies: string[] =
-      typeof (res.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie === 'function'
-        ? (res.headers as Headers & { getSetCookie: () => string[] }).getSetCookie()
+      typeof res.headers.getSetCookie === 'function'
+        ? res.headers.getSetCookie()
         : (() => {
             const out: string[] = [];
             res.headers.forEach((v, k) => { if (k.toLowerCase() === 'set-cookie') out.push(v); });
