@@ -36,6 +36,7 @@ export async function POST(req: NextRequest) {
       intervalMs: body.intervalMs ?? 15_000,
       maxAttempts: body.maxAttempts ?? 240,
       seatPreference: body.seatPreference ?? 'GENERAL_FIRST',
+      allowPartial: body.allowPartial ?? false,
       targets: body.targets!,
       telegram: body.telegram,
     };
