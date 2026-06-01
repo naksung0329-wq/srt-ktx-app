@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getOrCreateClient, invalidate } from '@/lib/session-pool';
-import { notifyTelegram, formatReservationMessage } from '@/lib/telegram';
+import { formatReservationMessage } from '@/lib/telegram';
+import { startPaymentReminder } from '@/lib/telegram-reminder';
 import type { Carrier, Train } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -49,11 +50,24 @@ export async function POST(req: NextRequest) {
       } else { throw e; }
     }
 
-    const tg = await notifyTelegram(formatReservationMessage(reservation), body.telegram);
+    let telegramStatus = 'skipped: 미설정';
+    if (body.telegram?.botToken && body.telegram?.chatId) {
+      try {
+        startPaymentReminder({
+          token: body.telegram.botToken,
+          chatId: body.telegram.chatId,
+          reservation,
+          initialText: formatReservationMessage(reservation),
+        });
+        telegramStatus = 'sent';
+      } catch (e) {
+        telegramStatus = `skipped: ${e instanceof Error ? e.message : 'telegram 오류'}`;
+      }
+    }
     return NextResponse.json({
       success: true,
       data: reservation,
-      telegram: tg.ok ? 'sent' : `skipped: ${tg.error}`,
+      telegram: telegramStatus,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : '예매 오류';
