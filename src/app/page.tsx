@@ -808,4 +808,39 @@ function Input({ placeholder, value, onChange, type = 'text' }: { placeholder: s
 
 function Select({ value, onChange, options, renderOption, large }: { value: string; onChange: (v: string) => void; options: string[]; renderOption?: (v: string) => string; large?: boolean }) {
   return (
-    <select value={value} onChange={e => onChan
+    <select value={value} onChange={e => onChange(e.target.value)}
+      className={`w-full mt-0.5 px-3 ${large ? 'py-2.5 text-base font-bold' : 'py-2 text-sm'} rounded-xl focus:outline-none`}
+      style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)' }}>
+      {options.map(o => <option key={o} value={o}>{renderOption ? renderOption(o) : o}</option>)}
+    </select>
+  );
+}
+
+function PsgBtn({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button onClick={onClick} disabled={disabled}
+      className="w-9 h-9 rounded-full font-black disabled:opacity-30 transition hover:scale-110 active:scale-95"
+      style={{ background: 'var(--surface)', border: '2px solid var(--border)', color: 'var(--text)' }}>
+      {children}
+    </button>
+  );
+}
+
+function SeatChip({ kind, children }: { kind: 'AVAILABLE'|'SOLDOUT'|'WAITING'|'NONE'; children: React.ReactNode }) {
+  const map = {
+    AVAILABLE: { bg: 'var(--success-soft)', fg: 'var(--success)' },
+    SOLDOUT:   { bg: 'var(--surface-2)',   fg: 'var(--text-soft)' },
+    WAITING:   { bg: 'var(--warning-soft)', fg: 'var(--warning)' },
+    NONE:      { bg: 'var(--surface-2)',   fg: 'var(--text-soft)' },
+  };
+  return <span className="px-2 py-1 rounded-md font-medium" style={{ background: map[kind].bg, color: map[kind].fg }}>{children}</span>;
+}
+
+function Row({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+  return (
+    <div className="flex justify-between">
+      <span style={{ color: 'var(--text-muted)' }}>{label}</span>
+      <span className="font-bold" style={{ color: highlight ? 'var(--accent)' : 'var(--text)' }}>{value}</span>
+    </div>
+  );
+}
