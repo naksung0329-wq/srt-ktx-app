@@ -80,7 +80,7 @@ export default function Home() {
   const [ipBlocked, setIpBlocked] = useState(false);
 
   // ===== 매크로 설정 =====
-  const [macroIntervalSec, setMacroIntervalSec] = useState(15);
+  const [macroIntervalSec, setMacroIntervalSec] = useState(30);
   const [macroMaxAttempts, setMacroMaxAttempts] = useState(240);
   const [macroPartial, setMacroPartial] = useState(true); // 인원 분할 예약 허용
   const [showMacroSettings, setShowMacroSettings] = useState(false);
@@ -735,8 +735,8 @@ export default function Home() {
                 <div className="pt-2">
                   <Label>간격 (±20% 지터)</Label>
                   <Select value={String(macroIntervalSec)} onChange={(v) => setMacroIntervalSec(parseInt(v))}
-                    options={['10','15','20','30','60']}
-                    renderOption={v => ({ '10':'10초 (위험)', '15':'15초 (권장)', '20':'20초 (안전)', '30':'30초 (최안전)', '60':'60초' } as Record<string,string>)[v]} />
+                    options={['20','30','45','60']}
+                    renderOption={v => ({ '20':'20초 (다소 위험)', '30':'30초 (권장)', '45':'45초 (안전)', '60':'60초 (최안전)' } as Record<string,string>)[v]} />
                 </div>
                 <div className="pt-2">
                   <Label>최대 시도</Label>
