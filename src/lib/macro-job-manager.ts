@@ -284,8 +284,9 @@ class MacroJobManager {
       }
 
       const base = j.settings.intervalMs;
-      const jitter = (Math.random() - 0.5) * 0.4 * base;
-      const nextMs = Math.max(3_000, base + jitter);
+      // 넓은 지터(±35%)와 최소 간격 상향으로 봇 패턴 완화
+      const jitter = (Math.random() - 0.5) * 0.7 * base;
+      const nextMs = Math.max(8_000, base + jitter);
       const prefix = j.partial && j.securedCount > 0 ? `(${j.securedCount}/${j.settings.passengers}명 확보) ` : '';
       j.lastMessage = prefix + (result.message ?? '매진 확인 중...');
       this.scheduleNext(j, nextMs);
@@ -293,10 +294,22 @@ class MacroJobManager {
       if (j.stopRequested) return;
       const msg = e instanceof Error ? e.message : '알 수 없는 오류';
 
-      if (msg.includes('IP') && msg.includes('차단')) {
+      const blocked =
+        msg.includes('Your IP Address Blocked') || msg.includes('abnormal access') ||
+        (msg.includes('IP') && msg.includes('차단'));
+      if (blocked) {
         j.status = 'failed';
-        j.error = msg;
-        j.lastMessage = msg;
+        j.error = 'IP 차단 감지 — 매크로 중지 (30~60분 후 재시도하세요)';
+        j.lastMessage = j.error;
+        // 차단 시 두드림 중단 + 1회 알림
+        if (j.settings.telegram) {
+          import('./telegram').then(({ notifyTelegram }) =>
+            notifyTelegram(
+              `🚫 <b>IP 차단 감지</b>\n${j.carrier} ${j.dep}→${j.arr}\n매크로를 중지했습니다. 30~60분 후 다시 시작하세요. (계속 두드리면 차단이 길어집니다)`,
+              j.settings.telegram,
+            ).catch(() => {})
+          ).catch(() => {});
+        }
         this.maybeStopKeepAlive();
         return;
       }

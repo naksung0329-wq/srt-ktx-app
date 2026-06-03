@@ -186,6 +186,10 @@ export class SrtClient {
       },
     });
 
+    if (text.includes('Your IP Address Blocked') || text.includes('abnormal access')) {
+      throw new Error('SRT IP 차단 (abnormal access) — 30~60분 후 재시도하세요');
+    }
+
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(text); } catch { throw new Error('SRT 응답 파싱 실패: ' + text.slice(0, 200)); }
 
@@ -305,6 +309,10 @@ export class SrtClient {
         ...passengerData,
       },
     });
+
+    if (text.includes('Your IP Address Blocked') || text.includes('abnormal access')) {
+      throw new Error('SRT IP 차단 (abnormal access) — 30~60분 후 재시도하세요');
+    }
 
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(text); } catch { throw new Error('SRT 예매 응답 파싱 실패: ' + text.slice(0, 300)); }
